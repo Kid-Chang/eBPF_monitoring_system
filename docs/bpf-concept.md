@@ -55,14 +55,12 @@ vmlinux.h를 생성하기 위해서는 커널의 BTF 메타데이터가 필요�
 ### load하기
 ```
 > sudo -s
-chang@chang-pc:~/dev/monitoring_system/practice# ls /sys/fs/bpf
-chang@chang-pc:~/dev/monitoring_system/practice# ls
+chang@chang-pc:~/dev/monitoring_system/practice# sudo ls /sys/fs/bpf
 ```
 
-sys/fs/bpf에 /sys/fs/bpf/ 아래에 개별 이름으로 load한다.
+/sys/fs/bpf/ 아래에 개별 이름으로 load한다.
 ```
 sudo bpftool prog loadall monitor.bpf.o /sys/fs/bpf
-
 ```
 
 각각 프로그램 fd가 각각 저장되고 커널에 load됨. 또한 bpf map도 같이 로드된다.
@@ -158,4 +156,13 @@ SEC("kprobe/_do_fork")
 
 // tracepoint에 attach
 SEC("tracepoint/sched/sched_process_fork")
+```
+
+## `/sys/kernel/debug/tracing/events`
+해당 경로에서 tracing, syscall 등의 이벤트들을 확인할 수 있습니다.
+
+```
+sudo ls /sys/kernel/debug/tracing/
+available_events                  buffer_size_kb         dyn_ftrace_total_info  function_profile_enabled  max_graph_depth  README               set_event              set_ftrace_notrace_pid  stack_max_size      touched_functions  trace_options        tracing_on        user_events_status
+available_filter_functions        buffer_subbuf_size_kb  enabled_functions      hwlat_detector            options          rv                   set_event_notrace_pid  set_ftrace_pid          stack_trace         trace              trace_pipe           tracing_thresh
 ```
