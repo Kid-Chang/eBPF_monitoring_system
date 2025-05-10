@@ -2,14 +2,6 @@
 
 
 ##  chap 1. Sensor 만들기
-### 정적 로그 수집
-
-### build
-```
-clang -target bpf -I/usr/include/$(uname -m)-linux-gnu -g -O2 -c ./monitor.bpf.c -o ./monitor.bpf.o
-```
-
-
 
 ## 실행방법
 ```
@@ -25,7 +17,6 @@ go build -o process-monitor main.go
 // go 프로그램이 monitor.bpf.o를 커널에 삽입하고, 생성된 bpf map을 통해 로그 수집 시작
 sudo ./process-monitor
 ```
-
 
 ## 트러블슈팅
 > fatal error: 'asm/types.h' file not found
