@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unsafe"
 
@@ -202,19 +203,20 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to open ringbuf: %v", err)
 	}
-	defer rd.Close()
+	// 프로그램이 종료될 떄가 아닌 sig 값을 받았을 때 종료되야함으로 코드 밑에서
+	// defer rd.Close()
 
 	file_rd, err := ringbuf.NewReader(fileObjs.Maps.FileEvents)
 	if err != nil {
 		log.Fatalf("failed to open ringbuf: %v", err)
 	}
-	defer file_rd.Close()
+	// defer file_rd.Close()
 
 	tcpRd, err := ringbuf.NewReader(tcpObjs.Maps.ConnectEvents)
 	if err != nil {
 		log.Fatalf("failed to open TCP ringbuf: %v", err)
 	}
-	defer tcpRd.Close()
+	// defer tcpRd.Close()
 
 	// 부팅 시간 계산
 	bootTime, err := getBootTime()
@@ -227,113 +229,116 @@ func main() {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt)
 
+	var wg sync.WaitGroup
+	wg.Add(3) // 고루틴 3개 실행
+
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	done := make(chan struct{})
-	// go func() {
-	// 	defer close(done)
-	// 	for {
-	// 		select {
-	// 		case <-ctx.Done():
-	// 			return
-	// 		default:
-	// 			record, err := rd.Read()
-	// 			if err != nil {
-	// 				if err == ringbuf.ErrClosed {
-	// 					log.Println("ringbuf closed, exiting reader")
-	// 					return
-	// 				}
-	// 				log.Printf("reading ringbuf: %v", err)
-	// 				continue
-	// 			}
-
-	// 			if len(record.RawSample) < int(unsafe.Sizeof(Event{})) {
-	// 				log.Printf("invalid event size: %d", len(record.RawSample))
-	// 				continue
-	// 			}
-
-	// 			var event Event
-	// 			buf := bytes.NewBuffer(record.RawSample[:unsafe.Sizeof(Event{})])
-	// 			if err := binary.Read(buf, binary.LittleEndian, &event); err != nil {
-	// 				log.Printf("failed to parse event: %v", err)
-	// 				continue
-	// 			}
-
-	// 			comm := safeComm(event.Comm[:])
-	// 			wallTime := bootTime.Add(time.Duration(event.Timestamp))
-
-	// 			out := OutputEvent{
-	// 				Event:     map[bool]string{false: "create", true: "exit"}[event.IsExit],
-	// 				Comm:      comm,
-	// 				WallTime:  wallTime.Format(time.RFC3339Nano),
-	// 				Pid:       event.Pid,
-	// 				Ppid:      event.Ppid,
-	// 				Timestamp: event.Timestamp,
-	// 			}
-
-	// 			j, _ := json.Marshal(out)
-	// 			fmt.Println(string(j))
-	// 		}
-	// 	}
-	// }()
-
-	// go func() {
-	// 	for {
-	// 		select {
-	// 		case <-ctx.Done():
-	// 			return
-	// 		default:
-	// 			record, err := file_rd.Read()
-	// 			if err != nil {
-	// 				if err == ringbuf.ErrClosed {
-	// 					log.Println("file ringbuf closed, exiting reader")
-	// 					return
-	// 				}
-	// 				log.Printf("reading file ringbuf: %v", err)
-	// 				continue
-	// 			}
-
-	// 			type FileEvent struct {
-	// 				Timestamp uint64
-	// 				Pid       uint32
-	// 				Comm      [16]byte
-	// 				Filename  [256]byte
-	// 			}
-
-	// 			if len(record.RawSample) < int(unsafe.Sizeof(FileEvent{})) {
-	// 				log.Printf("invalid file event size: %d", len(record.RawSample))
-	// 				continue
-	// 			}
-
-	// 			var fe FileEvent
-	// 			buf := bytes.NewBuffer(record.RawSample[:unsafe.Sizeof(FileEvent{})])
-	// 			if err := binary.Read(buf, binary.LittleEndian, &fe); err != nil {
-	// 				log.Printf("failed to parse file event: %v", err)
-	// 				continue
-	// 			}
-
-	// 			comm := safeComm(fe.Comm[:])
-	// 			filename := safeComm(fe.Filename[:])
-	// 			wallTime := bootTime.Add(time.Duration(fe.Timestamp))
-
-	// 			out := map[string]interface{}{
-	// 				"event":     "file_open",
-	// 				"comm":      comm,
-	// 				"filename":  filename,
-	// 				"wall_time": wallTime.Format(time.RFC3339Nano),
-	// 				"pid":       fe.Pid,
-	// 				"timestamp": fe.Timestamp,
-	// 			}
-
-	// 			j, _ := json.Marshal(out)
-	// 			fmt.Println(string(j))
-	// 		}
-	// 	}
-	// }()
+	// defer cancel()
 
 	go func() {
-		defer close(done)
+		defer wg.Done()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				record, err := rd.Read()
+				if err != nil {
+					if err == ringbuf.ErrClosed {
+						log.Println("ringbuf closed, exiting reader")
+						return
+					}
+					log.Printf("reading ringbuf: %v", err)
+					continue
+				}
+
+				if len(record.RawSample) < int(unsafe.Sizeof(Event{})) {
+					log.Printf("invalid event size: %d", len(record.RawSample))
+					continue
+				}
+
+				var event Event
+				buf := bytes.NewBuffer(record.RawSample[:unsafe.Sizeof(Event{})])
+				if err := binary.Read(buf, binary.LittleEndian, &event); err != nil {
+					log.Printf("failed to parse event: %v", err)
+					continue
+				}
+
+				comm := safeComm(event.Comm[:])
+				wallTime := bootTime.Add(time.Duration(event.Timestamp))
+
+				out := OutputEvent{
+					Event:     map[bool]string{false: "create", true: "exit"}[event.IsExit],
+					Comm:      comm,
+					WallTime:  wallTime.Format(time.RFC3339Nano),
+					Pid:       event.Pid,
+					Ppid:      event.Ppid,
+					Timestamp: event.Timestamp,
+				}
+
+				j, _ := json.Marshal(out)
+				fmt.Println(string(j))
+			}
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				record, err := file_rd.Read()
+				if err != nil {
+					if err == ringbuf.ErrClosed {
+						log.Println("file ringbuf closed, exiting reader")
+						return
+					}
+					log.Printf("reading file ringbuf: %v", err)
+					continue
+				}
+
+				type FileEvent struct {
+					Timestamp uint64
+					Pid       uint32
+					Comm      [16]byte
+					Filename  [256]byte
+				}
+
+				if len(record.RawSample) < int(unsafe.Sizeof(FileEvent{})) {
+					log.Printf("invalid file event size: %d", len(record.RawSample))
+					continue
+				}
+
+				var fe FileEvent
+				buf := bytes.NewBuffer(record.RawSample[:unsafe.Sizeof(FileEvent{})])
+				if err := binary.Read(buf, binary.LittleEndian, &fe); err != nil {
+					log.Printf("failed to parse file event: %v", err)
+					continue
+				}
+
+				comm := safeComm(fe.Comm[:])
+				filename := safeComm(fe.Filename[:])
+				wallTime := bootTime.Add(time.Duration(fe.Timestamp))
+
+				out := map[string]interface{}{
+					"event":     "file_open",
+					"comm":      comm,
+					"filename":  filename,
+					"wall_time": wallTime.Format(time.RFC3339Nano),
+					"pid":       fe.Pid,
+					"timestamp": fe.Timestamp,
+				}
+
+				j, _ := json.Marshal(out)
+				fmt.Println(string(j))
+			}
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
 		for {
 			select {
 			case <-ctx.Done():
@@ -386,5 +391,10 @@ func main() {
 	<-sig
 	log.Println("Exiting...")
 	cancel()
-	<-done
+
+	rd.Close()
+	file_rd.Close()
+	tcpRd.Close()
+
+	wg.Wait()
 }
