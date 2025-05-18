@@ -206,11 +206,11 @@ func main() {
 	// 프로그램이 종료될 떄가 아닌 sig 값을 받았을 때 종료되야함으로 코드 밑에서
 	// defer rd.Close()
 
-	file_rd, err := ringbuf.NewReader(fileObjs.Maps.FileEvents)
+	fileRd, err := ringbuf.NewReader(fileObjs.Maps.FileEvents)
 	if err != nil {
 		log.Fatalf("failed to open ringbuf: %v", err)
 	}
-	// defer file_rd.Close()
+	// defer fileRd.Close()
 
 	tcpRd, err := ringbuf.NewReader(tcpObjs.Maps.ConnectEvents)
 	if err != nil {
@@ -289,7 +289,7 @@ func main() {
 			case <-ctx.Done():
 				return
 			default:
-				record, err := file_rd.Read()
+				record, err := fileRd.Read()
 				if err != nil {
 					if err == ringbuf.ErrClosed {
 						log.Println("file ringbuf closed, exiting reader")
@@ -393,7 +393,7 @@ func main() {
 	cancel()
 
 	rd.Close()
-	file_rd.Close()
+	fileRd.Close()
 	tcpRd.Close()
 
 	wg.Wait()
