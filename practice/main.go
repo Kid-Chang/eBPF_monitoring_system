@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/signal"
 	"strconv"
@@ -18,8 +19,8 @@ import (
 	"github.com/cilium/ebpf/link"
 
 	// 커널 5.11 이후 버전에서는 필수 아님
-	// "github.com/cilium/ebpf/rlimit"
 	"github.com/cilium/ebpf/ringbuf"
+	"github.com/cilium/ebpf/rlimit"
 )
 
 // C의 struct event와 반드시 메모리 레이아웃이 일치해야 합니다.
@@ -33,6 +34,14 @@ type Event struct {
 	// 이에 따라 구조체의 크기가 다르게 인식 될 수 있음으로 안정성을 위해 여기서 패딩을 추가함.
 	// 파이썬에서는 고려하지 않아도 됨.
 	_ [7]byte // padding: bool(1) + 7 = 8 bytes (align to 8 bytes)
+}
+
+type TcpEvent struct {
+	Timestamp uint64
+	Pid       uint32
+	Comm      [16]byte
+	Daddr     uint32
+	Dport     uint16
 }
 
 // json 형태로 로그를 출력하기 위함.
@@ -93,9 +102,9 @@ func main() {
 	// eBPF에서 만든 map, ring buffer 같은 자료구조는 커널 메모리 공간에 생성됨.
 	// 그리고 이 메모리는 항상 상주해야함. swap-out 되는 것을 방지하기 위해 락을 검.
 	// https://pkg.go.dev/github.com/cilium/ebpf/rlimit#RemoveMemlock 참고
-	// if err := rlimit.RemoveMemlock(); err != nil {
-	// 	log.Fatalf("failed to remove memlock limit: %v", err)
-	// }
+	if err := rlimit.RemoveMemlock(); err != nil {
+		log.Fatalf("failed to remove memlock limit: %v", err)
+	}
 
 	// 다른 ebpf.LoadCollectionSpec의 LoadAndAssign에서 같은 spec을 설정하면 에러 발생
 	// .bpf.c 에 따라 spec 분리
@@ -105,6 +114,11 @@ func main() {
 	}
 
 	file_spec, err := ebpf.LoadCollectionSpec("file_monitor.bpf.o")
+	if err != nil {
+		log.Fatalf("failed to load BPF object: %v", err)
+	}
+
+	tcpSpec, err := ebpf.LoadCollectionSpec("tcp_connect_monitor.bpf.o")
 	if err != nil {
 		log.Fatalf("failed to load BPF object: %v", err)
 	}
@@ -129,12 +143,23 @@ func main() {
 			FileEvents *ebpf.Map `ebpf:"file_events"`
 		}
 	}{}
+	tcpObjs := struct {
+		Programs struct {
+			HandleTcpConnect *ebpf.Program `ebpf:"handle_tcp_connect"`
+		}
+		Maps struct {
+			ConnectEvents *ebpf.Map `ebpf:"connect_events"`
+		}
+	}{}
 
 	if err := spec.LoadAndAssign(&objs, nil); err != nil {
 		log.Fatalf("failed to load and assign BPF objects: %v", err)
 	}
 	if err := file_spec.LoadAndAssign(&fileObjs, nil); err != nil {
 		log.Fatalf("failed to load and assign BPF objects: %v", err)
+	}
+	if err := tcpSpec.LoadAndAssign(&tcpObjs, nil); err != nil {
+		log.Fatalf("failed to load and assign TCP BPF objects: %v", err)
 	}
 
 	defer objs.Programs.HandleFork.Close()
@@ -143,6 +168,9 @@ func main() {
 
 	defer fileObjs.Programs.HandleOpenat.Close()
 	defer fileObjs.Maps.FileEvents.Close()
+
+	defer tcpObjs.Programs.HandleTcpConnect.Close()
+	defer tcpObjs.Maps.ConnectEvents.Close()
 
 	// tracepoint attach
 	forkLink, err := link.Tracepoint("sched", "sched_process_fork", objs.Programs.HandleFork, nil)
@@ -163,6 +191,13 @@ func main() {
 	}
 	defer openatLink.Close()
 
+	// tcpLink, err := link.Kprobe("tcp_v4_connect", tcpObjs.Programs.HandleTcpConnect, nil)
+	tcpLink, err := link.Tracepoint("syscalls", "sys_enter_connect", tcpObjs.Programs.HandleTcpConnect, nil)
+	if err != nil {
+		log.Fatalf("failed to attach tcp kprobe: %v", err)
+	}
+	defer tcpLink.Close()
+
 	rd, err := ringbuf.NewReader(objs.Maps.Events)
 	if err != nil {
 		log.Fatalf("failed to open ringbuf: %v", err)
@@ -174,6 +209,12 @@ func main() {
 		log.Fatalf("failed to open ringbuf: %v", err)
 	}
 	defer file_rd.Close()
+
+	tcpRd, err := ringbuf.NewReader(tcpObjs.Maps.ConnectEvents)
+	if err != nil {
+		log.Fatalf("failed to open TCP ringbuf: %v", err)
+	}
+	defer tcpRd.Close()
 
 	// 부팅 시간 계산
 	bootTime, err := getBootTime()
@@ -237,52 +278,103 @@ func main() {
 	// 	}
 	// }()
 
+	// go func() {
+	// 	for {
+	// 		select {
+	// 		case <-ctx.Done():
+	// 			return
+	// 		default:
+	// 			record, err := file_rd.Read()
+	// 			if err != nil {
+	// 				if err == ringbuf.ErrClosed {
+	// 					log.Println("file ringbuf closed, exiting reader")
+	// 					return
+	// 				}
+	// 				log.Printf("reading file ringbuf: %v", err)
+	// 				continue
+	// 			}
+
+	// 			type FileEvent struct {
+	// 				Timestamp uint64
+	// 				Pid       uint32
+	// 				Comm      [16]byte
+	// 				Filename  [256]byte
+	// 			}
+
+	// 			if len(record.RawSample) < int(unsafe.Sizeof(FileEvent{})) {
+	// 				log.Printf("invalid file event size: %d", len(record.RawSample))
+	// 				continue
+	// 			}
+
+	// 			var fe FileEvent
+	// 			buf := bytes.NewBuffer(record.RawSample[:unsafe.Sizeof(FileEvent{})])
+	// 			if err := binary.Read(buf, binary.LittleEndian, &fe); err != nil {
+	// 				log.Printf("failed to parse file event: %v", err)
+	// 				continue
+	// 			}
+
+	// 			comm := safeComm(fe.Comm[:])
+	// 			filename := safeComm(fe.Filename[:])
+	// 			wallTime := bootTime.Add(time.Duration(fe.Timestamp))
+
+	// 			out := map[string]interface{}{
+	// 				"event":     "file_open",
+	// 				"comm":      comm,
+	// 				"filename":  filename,
+	// 				"wall_time": wallTime.Format(time.RFC3339Nano),
+	// 				"pid":       fe.Pid,
+	// 				"timestamp": fe.Timestamp,
+	// 			}
+
+	// 			j, _ := json.Marshal(out)
+	// 			fmt.Println(string(j))
+	// 		}
+	// 	}
+	// }()
+
 	go func() {
+		defer close(done)
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			default:
-				record, err := file_rd.Read()
+				record, err := tcpRd.Read()
 				if err != nil {
 					if err == ringbuf.ErrClosed {
-						log.Println("file ringbuf closed, exiting reader")
+						log.Println("TCP ringbuf closed")
 						return
 					}
-					log.Printf("reading file ringbuf: %v", err)
+					log.Printf("reading tcp ringbuf: %v", err)
 					continue
 				}
 
-				type FileEvent struct {
-					Timestamp uint64
-					Pid       uint32
-					Comm      [16]byte
-					Filename  [256]byte
-				}
-
-				if len(record.RawSample) < int(unsafe.Sizeof(FileEvent{})) {
-					log.Printf("invalid file event size: %d", len(record.RawSample))
+				if len(record.RawSample) < int(unsafe.Sizeof(TcpEvent{})) {
+					log.Printf("invalid tcp event size: %d", len(record.RawSample))
 					continue
 				}
 
-				var fe FileEvent
-				buf := bytes.NewBuffer(record.RawSample[:unsafe.Sizeof(FileEvent{})])
-				if err := binary.Read(buf, binary.LittleEndian, &fe); err != nil {
-					log.Printf("failed to parse file event: %v", err)
+				var te TcpEvent
+				buf := bytes.NewBuffer(record.RawSample[:unsafe.Sizeof(TcpEvent{})])
+				if err := binary.Read(buf, binary.LittleEndian, &te); err != nil {
+					log.Printf("failed to parse tcp event: %v", err)
 					continue
 				}
 
-				comm := safeComm(fe.Comm[:])
-				filename := safeComm(fe.Filename[:])
-				wallTime := bootTime.Add(time.Duration(fe.Timestamp))
+				wallTime := bootTime.Add(time.Duration(te.Timestamp))
+				comm := safeComm(te.Comm[:])
+
+				ipBytes := make([]byte, 4)
+				binary.BigEndian.PutUint32(ipBytes, te.Daddr)
 
 				out := map[string]interface{}{
-					"event":     "file_open",
+					"event":     "tcp_connect",
 					"comm":      comm,
-					"filename":  filename,
+					"pid":       te.Pid,
 					"wall_time": wallTime.Format(time.RFC3339Nano),
-					"pid":       fe.Pid,
-					"timestamp": fe.Timestamp,
+					"daddr":     net.IP(ipBytes).String(),
+					"dport":     te.Dport,
+					"timestamp": te.Timestamp,
 				}
 
 				j, _ := json.Marshal(out)

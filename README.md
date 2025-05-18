@@ -5,12 +5,17 @@
 
 ## 실행방법
 ```
-
 // bpf 프로그램에서 "vmlinux.h"를 이용한 커널 구조체를 사용하기 위함
 sudo apt install linux-tools-common linux-tools-$(uname -r)
 bpftool btf dump file /sys/kernel/btf/vmlinux format c > vmlinux.h
-// <커널 스페이스> bpf 프로그램 빌드
+
+// <커널 스페이스> process create, terminate log bpf 프로그램 빌드
 clang -target bpf -O2 -g -c monitor.bpf.c -o monitor.bpf.o
+// <커널 스페이스> file open log bpf 프로그램 빌드
+clang -target bpf -O2 -g -c file_monitor.bpf.c -o file_monitor.bpf.o
+// <커널 스페이스> tcp connect log bpf 프로그램 빌드
+clang -target bpf -O2 -g -c tcp_connet_monitor.bpf.c -o tcp_connet_monitor.bpf.o
+
 // <유저 스페이스> main.go 빌드
 go build -o process-monitor main.go
 
@@ -18,14 +23,19 @@ go build -o process-monitor main.go
 sudo ./process-monitor
 ```
 
+
+
 ## 트러블슈팅
 > fatal error: 'asm/types.h' file not found
+
 `sudo apt-get install -y gcc-multilib`
 
 > fatal error: 'bpf/bpf_helpers.h' file not found
+
 `apt install libbpf-dev`
 
 > (헤더파일 탐색을 위해) vscode에서 커널헤더를 찾지 못한다면
+
 .c_cpp_properties.json에
 ```
 {
